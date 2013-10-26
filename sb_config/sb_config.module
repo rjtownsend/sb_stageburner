@@ -1,0 +1,7 @@
+<?php
+/**
+ * @file
+ * Code for the Stageburner Config feature.
+ */
+
+include_once 'sb_config.features.inc';

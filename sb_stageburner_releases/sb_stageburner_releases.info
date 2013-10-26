@@ -1,0 +1,7 @@
+name = Stageburner Releases Utility
+description = Allows users to build a release and push it to a specific destination.
+core = 7.x
+package = Stageburner
+version = 7.x-1.0
+
+dependencies[] = sb_stageburner

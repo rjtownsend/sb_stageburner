@@ -1,0 +1,5 @@
+name = Stageburner
+description = Provides the framework for a variety of stageburner modules
+core = 7.x
+package = Stageburner
+version = 7.x-1.0

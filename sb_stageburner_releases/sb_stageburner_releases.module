@@ -1,0 +1,297 @@
+<?php
+
+/**
+ * Implemenation of hook_menu().
+ */
+function sb_stageburner_releases_menu() {
+  $items['deploy-site'] = array(
+    'title' => 'Modal Popup Test Page',
+    'description' => 'Deploy code and specify the destination to which to push the code.',
+    'page callback' => 'sb_stageburner_releases_modal_test_paqe',
+    'access arguments' => array('use Stageburner utilities'),
+    'weight' => -1000,
+  );
+
+  $items['sb_stageburner_releases/%/%ctools_js'] = array(
+    'page callback' => 'sb_stageburner_releases_callback',
+    'page arguments' => array(1,2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Page callback for modal test page
+ */
+function sb_stageburner_releases_modal_test_paqe() {
+  // Load the modal library and add the modal javascript.
+  ctools_include('modal');
+  ctools_modal_add_js();
+  $view = views_embed_view('sb_deploy', 'page');
+  return $view;
+}
+
+/**
+ * Ajax menu callback.
+ */
+function sb_stageburner_releases_callback($nid, $ajax) {
+  if ($ajax) {
+    ctools_include('ajax');
+    ctools_include('modal');
+ 
+    $form_state = array(
+      'ajax' => TRUE,
+      'title' => t('Build a Release') . $nid . 'test',
+    );
+
+    // Add $nid to args array
+    $form_state['build_info']['args'][] = $nid;
+ 
+    // Use ctools to generate ajax instructions for the browser to create
+    // a form in a modal popup.
+    $output = ctools_modal_form_wrapper('sb_stageburner_releases_release_form', $form_state);
+ 
+    // If the form has been submitted, there may be additional instructions
+    // such as dismissing the modal popup.
+    if (!empty($form_state['ajax_commands'])) {
+      $output = $form_state['ajax_commands'];
+    }
+ 
+    // Return the ajax instructions to the browser via ajax_render().
+    print ajax_render($output);
+    drupal_exit();
+  }
+  else {
+    return drupal_get_form('sb_stageburner_releases_release_form');
+  }
+}
+
+/**
+ * Page callback for deploy page
+ */
+function sb_stageburner_releases_deploy_paqe() {
+  $build = array();
+
+  // @TODO NID should come from views, build param should come from github branch/fork
+  $node = node_load(2);
+  $build['dev'] = drupal_get_form('sb_stageburner_releases_release_form_' . $node->nid, $node);
+  $node2 = node_load(3);
+  $build['qa'] = drupal_get_form('sb_stageburner_releases_release_form_' . $node2->nid, $node2);
+  $node3 = node_load(4);
+  $build['prod'] = drupal_get_form('sb_stageburner_releases_release_form_' . $node3->nid, $node3);
+
+  return $build;
+}
+
+/**
+ * Implementation of hook_forms
+ */
+function sb_stageburner_releases_forms($form_id, $args) {
+  $forms = array();
+
+  if (preg_match('/sb_stageburner_releases_release_form_*/', $form_id)) {
+    $forms[$form_id] = array(
+      'callback' => 'sb_stageburner_releases_release_form',
+    );
+    return $forms;
+  }
+}
+
+/**
+ * Helper function that pulls project and site information based on an NID
+ * @return array
+ *  Project, Dev, QA, Prod nids
+ */
+function sb_project_info($nid, $objects=FALSE) {
+  $site_info = views_get_view_result('sb_project_nids', 'block_1', $nid);
+  $project_info = views_get_view_result('sb_project_nids', 'attachment_1', $nid);
+  $project_site_info = views_get_view_result('sb_project_nids', 'attachment_2', $nid);
+
+  //$nids[] = array();
+  $nids['site_info']['nid'] = $site_info[0]->nid;
+  
+  $nids['project_info']['nid'] = $project_info[0]->node_field_data_field_primary_account_nid;
+  
+  foreach($project_site_info as $key => $value) {
+    $nids['project_site_info'][$key]['nid'] = $value->field_primary_account_node_nid;
+    $nids['project_site_info'][$key]['type'] = $value->field_field_type[0]['raw']['value'];
+  }
+
+  if($objects==TRUE) {
+    $nids['site_info']['node'] = node_load($nids['site_info']['nid']);
+    $nids['project_info']['node'] = node_load($nids['project_info']['nid']);
+    return $nids;
+  }
+
+  return $nids;
+}
+
+/**
+ * Form builder for the deploy tool
+ * Node NID is a required param passed through
+ * build_info args.
+ */
+function sb_stageburner_releases_release_form($form, &$form_state) {
+  // The node nid is passed through build_info args
+  if(isset($form_state['build_info']['args'][0]->nid)) {
+    $nid = $form_state['build_info']['args'][0]->nid;
+  } elseif (isset($form_state['build_info']['args'][0]) && is_string($form_state['build_info']['args'][0])) {
+    $nid = $form_state['build_info']['args'][0];
+  } else {
+    watchdog('debug', 'An NID is required for this form to work');
+    return;
+  }
+  
+  $form_state['build_info']['args']['sb_project_info'] = sb_project_info($nid, TRUE);
+
+  $sb_project_repo_name = $form_state['build_info']['args']['sb_project_info']['project_info']['node']->field_github_repo_name['und'][0]['value'];
+
+  // Get existing values of form elements used during AJAX callbacks.
+  $sb_project_repos = _sb_stageburner_github_get_forks($sb_project_repo_name);
+
+  $sb_project_repo = isset($form_state['values']['sb_project_source_' . $nid]['repository']) ? $form_state['values']['sb_project_source_' . $nid]['repository'] : '';
+
+  $sb_project_tags_branches = array();
+
+  if (!empty($sb_project_repo)) {
+    $sb_project_tags = _sb_stageburner_github_get_refs('tags', $sb_project_repos[$sb_project_repo]->owner->login, $sb_project_repos[$sb_project_repo]->name);
+    $sb_project_branches = _sb_stageburner_github_get_refs('branches', $sb_project_repos[$sb_project_repo]->owner->login, $sb_project_repos[$sb_project_repo]->name);
+    $sb_project_tags_branches = array_merge($sb_project_tags, $sb_project_branches);
+  }
+
+  $form = array(
+    '#attributes' => array(
+      'id' => 'release_form_' . $nid,
+      'class' => array('clearfix'),
+    ),
+    '#attached' => array(
+      'css' => array(
+        drupal_get_path('module', 'sb_stageburner_releases') . '/sb_stageburner_releases.css',
+      ),
+    ),
+  );
+  $form['title'] = array(
+    '#markup' => '<h3>' . t('Build a Release') . '</h3>',
+  );
+
+  $form['sb_project_source_' . $nid] = array(
+    '#type' => 'fieldset',
+    '#description' => t('Deploy a branch to the development environment.'),
+    '#collabsible' => FALSE,
+    '#title' => 'Development',
+    '#tree' => TRUE,
+  );
+  $form['sb_project_source_' . $nid]['repository'] = array(
+    '#type' => 'select',
+    '#options' => drupal_map_assoc(array_keys($sb_project_repos)),
+    '#title' => t('Repository'),
+    '#empty_option' => t('- Select -'),
+    '#required' => TRUE,
+    '#ajax' => array(
+      'event' => 'change',
+      'callback' => '_sb_stageburner_releases_release_form_ajax_callback',
+      'wrapper' => 'release_form_' . $nid,
+    ),
+  );
+  $form['sb_project_source_' . $nid]['tag_or_branch'] = array(
+    '#type' => 'select',
+    '#options' => drupal_map_assoc(array_keys($sb_project_tags_branches)),
+    '#title' => t('Tag or Branch'),
+    '#required' => TRUE,
+    '#empty_option' => empty($sb_project_tags_branches) ? t('- Disabled -') : t('- Select -'),
+    '#states' => array(
+      'enabled' => array(
+        ':input[name="sb_project_source_' . $nid . '[repository]"]' => array('filled' => TRUE),
+      ),
+    ),
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Build Release'),
+  );
+  $form['reset'] = array(
+    '#type' => 'submit',
+    '#value' => t('Clear Build Files'),
+    '#submit' => array('sb_stageburner_releases_release_form_submit'),
+    '#limit_validation_errors' => array(),
+  );
+
+  return $form;
+}
+
+/**
+ * Submit function for the Build Release Form.
+ */
+function sb_stageburner_releases_release_form_submit($form, $form_state) {
+  //$form_state['ajax_commands'][] = ctools_ajax_command_redirect('node/add/page');
+  switch ($form_state['clicked_button']['#value']) {
+    case t('Build Release'):
+      $batch = _sb_stageburner_releases_build_batch($form_state);
+      batch_set($batch);
+      break;
+    case t('Clear Build Files'):
+      $batch = _sb_stageburner_releases_clear_batch();
+      batch_set($batch);
+      break;
+  };  
+      // Tell the browser to close the modal.
+      //$form_state['ajax_commands'][] = ctools_ajax_command_redirect('node/add/page');
+      //ctools_include('ajax'); ctools_add_js('ajax-responder'); $commands[] = ctools_ajax_command_redirect('node/add/page');print ajax_render($commands);
+}
+
+function _sb_stageburner_releases_clear_batch() {
+  $batch = array(
+    'title' => t('Clearing all build files.'),
+    'operations' => array(
+      array('sb_stageburner_releases_clear_files', array()),
+    ),
+    'finished' => 'sb_stageburner_releases_clear_batch_complete',
+    'file' => drupal_get_path('module', 'sb_stageburner_releases') . '/sb_stageburner_releases.batch.inc',
+  );
+
+  return $batch;
+}
+
+/**
+ * Create the batch operation for the build release utility.
+ */
+function _sb_stageburner_releases_build_batch($values) {
+  // Get form values for each fieldset.
+  $keys = array_keys($values['values']);
+  foreach ($keys as $key) {
+    if (preg_match('/sb_project_source*/', $key)) {
+      $sb_project_source = $values['values'][$key];
+    }
+  }
+
+  // Get the git repo url
+  // @TODO this should come from project
+  $credentials = variable_get('sb_github_credentials', '');
+  $sb_project_git_repo_url = 'https://' . $credentials . '@github.com/' . $sb_project_source['repository'] . '.git';
+
+  $batch = array(
+    'title' => t('Releasing'),
+    'operations' => array(
+      array('sb_stageburner_releases_clone_repo', array(
+        $values['build_info']['args']['sb_project_info']['site_info']['node']->field_root['und'][0]['value'],
+        $sb_project_source['repository'],
+        $sb_project_git_repo_url,
+        $sb_project_source['tag_or_branch'],
+      )),
+    ),
+    // @TODO Populate site node values for rep & branch that was checked out
+    'finished' => 'sb_stageburner_releases_build_batch_complete',
+    'file' => drupal_get_path('module', 'sb_stageburner_releases') . '/sb_stageburner_releases.batch.inc',
+  );
+  return $batch;
+}
+
+/**
+ * Callback function refreshes the build release form.
+ */
+function _sb_stageburner_releases_release_form_ajax_callback($form, $form_state) {
+  return $form;
+}

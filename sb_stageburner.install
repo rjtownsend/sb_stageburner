@@ -1,0 +1,10 @@
+<?php
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function sb_stageburner_uninstall() {
+  // Delete the git path and github variables, and drush path variable
+  variable_del('sb_stageburner_git_bin');
+  variable_del('sb_stageburner_drush_bin');
+}

@@ -1,0 +1,378 @@
+<?php
+
+define('SB_STAGEBURNER_GITHUB_API_URL', 'https://api.github.com');
+
+/**
+ * Implemenation of hook_menu().
+ */
+function sb_stageburner_menu() {
+  $items['admin/stageburner'] = array(
+    'title' => 'Stageburner',
+    'page callback' => 'sb_stageburner_list_page',
+    'access arguments' => array('access administration pages'),
+  );
+  $items['admin/stageburner/config'] = array(
+    'title' => 'Configure Stageburner',
+    'description' =>  'Configure the various settings associated with Stageburner',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('sb_stageburner_admin_settings'),
+    'file' => 'sb_stageburner.admin.inc',
+    'access arguments' => array('access administration pages'),
+    'weight' => 1000,
+  );
+
+  return $items;
+}
+
+/**
+ * hook_menu callback function that displays links on admin page
+ */
+function sb_stageburner_list_page() {
+  $item = menu_get_item();
+  $content = system_admin_menu_block($item);
+
+  return theme('admin_block_content', array('content' => $content));
+}
+
+/**
+ * Implemenation of hook_theme().
+ */
+function sb_stageburner_theme(){
+  return array(
+    'frontpage' =>  array(
+      'template' => 'page--front',
+      'render element' => 'page'
+    ),
+  );
+}
+
+/**
+ * Implemenation of hook_preprocess_page().
+ */
+function sb_stageburner_preprocess_page(&$variables, $hook) {
+  if ( drupal_is_front_page() ) {
+    $variables['theme_hook_suggestions'][] = 'frontpage';
+  }
+}
+
+/**
+ * If debug mode is turned on and the devel module is enabled, print $var.
+ *
+ * @param $var
+ *   The variable or message to print.
+ *
+ * @param $label
+ *   An optional label to display with the message.
+ */
+function sb_stageburner_debug($var, $label = '') {
+  if (module_exists('devel') && variable_get('sb_stageburner_debug_mode', '0')) {
+    dpm($var, $label);
+  }
+}
+
+/**
+ * Helper function for executing a command line command
+ */
+function _sb_stageburner_exec($cmd, $msg = '', $die_on_error = TRUE) {
+  exec($cmd . ' 2>&1', $output, $status);
+
+  sb_stageburner_debug($cmd);
+  sb_stageburner_debug('Status: ' . $status . ' | Output: ');
+  sb_stageburner_debug($output);
+
+  _sb_stageburner_batch_error_check($status, $msg, $die_on_error);
+
+  return $status == 0;
+}
+
+/**
+ * Helper function for determining if a command line error occured. Exit if error occurs.
+ *
+ * @param $status
+ *   The exit status of a command line command. If this is 0 then no error has
+ *   occured.
+ *
+ * @param $message
+ *   The error mesage to display.
+ */
+function _sb_stageburner_batch_error_check($status, $message = '', $die_on_error = TRUE) {
+  if ($status != 0) {
+    $message = empty($message) ? t('An error occured.') : $message;
+    if ($die_on_error) {
+      $result = array('status' => FALSE, 'data' => $message);
+      die(json_encode($result));
+    }
+  }
+}
+
+/**
+ * Helper function for changing directory. If directory does not exist, create it. 
+ *
+ * @param $path
+ *   The path of the directory to create and change to.
+ *
+ * @return
+ *   The curent working directory.
+ */
+function _sb_stageburner_chdir($path) {
+  _sb_stageburner_mkdir($path);
+  chdir($path);
+
+  sb_stageburner_debug('cd ' . getcwd() . '(' . $path . ')');
+
+  return $path;
+}
+
+/**
+ * Helper function for creating a directory that doesn't already exist.
+ *
+ * @param $path
+ *   The path of the directory to create.
+ */
+function _sb_stageburner_mkdir($path) {
+  if (!file_exists($path)) {
+    mkdir($path, 0777, TRUE);
+  }
+  return $path;
+}
+
+/**
+ * Helper funcion that returns the private files path.
+ *
+ * @return
+ *   path to the private files directory.
+ */
+function _sb_stageburner_get_private_files_path() {
+  // @TODO Location should be set in admin interface
+  $files_private_path = variable_get('file_private_path', '');
+  if (empty($files_private_path)) {
+    _sb_stageburner_batch_error_check(1, t('The private files path is not properly set.'));
+  }
+
+  // If the files path does not begin with a "/", prepend the document root.
+  $files_private_path = strpos($files_private_path, '/') === 0 ? $files_private_path : $_SERVER['DOCUMENT_ROOT'] . '/' . $files_private_path;
+
+  return $files_private_path;
+}
+
+/**
+ * Helper function used to connect to the GitHub API. The JSON object returned
+ * by the GitHub API is converted to an array before it is returned.
+ *
+ * @param $url
+ *   The path, relative to the base API path, to the desired API call.
+ *
+ * @param $method
+ *   The HTTP request method to use. Options are GET (default), POST, DELETE,
+ *   HEAD, PUT or PATCH.
+ *
+ * @param $data
+ *   Extra data required by the api call. For POST requests this should be an
+ *   associative array of post values.
+ *
+ * @return mixed
+ *   A structured JSON object or FALSE
+ */
+function _sb_stageburner_github_api_call($url, $method = 'GET', $data = NULL) {
+  $content = FALSE;
+
+  // Add a "per_page" to the URL so things dont get truncated.
+  $url .= (stripos($url, '?') === FALSE ? "?" : "&") . "per_page=1000";
+
+  // @TODO this shoudl be better thought out
+  $credentials = variable_get('sb_github_credentials', '');
+
+  if (empty($credentials)) {
+    drupal_set_message(t('No GitHub login credentials are defined.'), 'error');
+  }
+
+  // Connect to GitHub API using CURL and decode the JSON response.
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, SB_STAGEBURNER_GITHUB_API_URL . $url);
+  curl_setopt($ch, CURLOPT_USERPWD, $credentials);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  curl_setopt($ch, CURLOPT_HEADER, TRUE);
+  curl_setopt($ch, CURLOPT_USERAGENT, 'Drupal (+http://drupal.org/)');
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
+
+  $proxy = variable_get('sb_stageburner_proxy', '');
+  if ($proxy) {
+    curl_setopt($ch, CURLOPT_PROXY, $proxy);
+  }
+
+  switch ($method) {
+    case 'POST':
+      curl_setopt($ch, CURLOPT_POST, TRUE);
+      curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+      break;
+
+    default:
+      curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+      break;
+  }
+
+  $response = curl_exec($ch);
+  $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  $info = curl_getinfo($ch);
+  $header = substr($response, 0, $info['header_size']);
+  $content = substr($response, -$info['download_content_length']);
+  $content = json_decode($content);
+  curl_close($ch);
+
+  if ($http_code <= 0 || $http_code >= 400) {
+    drupal_set_message(t('The GitHub API request failed or returned no results.', array('!url' => $url)), 'error', FALSE);
+    sb_stageburner_debug($response, 'response');
+    return FALSE;
+  }
+
+  return $content;
+}
+
+/**
+ * Helper function used to retrieve a list of forks from the GitHub API.
+ *
+ * @param string $repo
+ *   The name of the repository to check for forks.
+ *
+ * @param bool $include_original
+ *   If TRUE the original repository from which the forks were forked is
+ *   included.
+ *
+ * @param key $string
+ *   The object key that contains the information that should be used as the
+ *   array key in returned array.
+ *
+ * @return array
+ */
+function _sb_stageburner_github_get_forks($repo, $include_original = TRUE, $key = 'full_name') {
+  $forks = array();
+  // @TODO this should be a param not a var
+  $github_group_name = variable_get('sb_stageburner_github_org_name', '');
+
+  // Get the main repository.
+  if ($include_original) {
+    $url = '/repos/' . $github_group_name . '/' . $repo;
+    if ($result = _sb_stageburner_github_api_call($url)) {
+      $forks[$result->$key] = $result;
+    }
+  }
+
+  // Get all the forks.
+  $url = '/repos/' . $github_group_name . '/' . $repo . '/forks';
+  if ($results = _sb_stageburner_github_api_call($url)) {
+    foreach ($results as $result) {
+      $forks[$result->$key] = $result;
+    }
+  }
+
+  ksort($forks, SORT_STRING);
+
+  return $forks;
+}
+
+/**
+ * Helper function used to retireive a list of refs from the GitHub API.
+ *
+ * @param $type
+ *    Either "branches" or "tags".
+ *
+ * @param $user
+ *   The name of the user who owns the repo in question.
+ *
+ * @param $repo
+ *   The name of the repository to check for forks.
+ *
+ * @return array
+ */
+function _sb_stageburner_github_get_refs($type, $user, $repo) {
+  $refs = array();
+
+  if (!empty($user) && !empty($repo)) {
+    $url = '/repos/' . $user . '/' . $repo . '/' . $type;
+    if ($results = _sb_stageburner_github_api_call($url)) {
+      foreach ($results as $result) {
+        $refs[$result->name] = $result;
+      }
+    }
+  }
+  ksort($refs, SORT_STRING);
+
+  return $refs;
+}
+
+/**
+ * Create a github pull request.
+ *
+ * @param  $repository
+ *   The repository containing code changes.
+ *
+ * @param $branch
+ *   The branch where the code changes are implemented.
+ *
+ * @param  $destination_branch
+ *   The branch in which the code changes should be merged.
+ *
+ * @return
+ *   The JSON response provided by the GitHub API or FALSE.
+ *
+ * @see http://developer.github.com/v3/pulls/#create-a-pull-request
+ */
+function _sb_stageburner_github_pull_request($repository, $branch, $destination_branch = 'master') {
+  global $user;
+  // @TODO this should be a param not a var
+  $github_group_name = variable_get('sb_stageburner_github_org_name', '');
+  list($github_user, $github_repo) = explode('/', $repository);
+
+  $url = '/repos/' . $github_group_name . '/' . $github_repo . '/pulls';
+
+  $data = array(
+    'title' => t('Pull request: @branch', array('@branch' => $branch)),
+    'body' => t('@user has certified the "@branch" branch.', array('@user' => $user->name, '@branch' => $branch)),
+    'head' => $github_user . ':' . $branch,
+    'base' => $destination_branch,
+  );
+
+  $response = _sb_stageburner_github_api_call($url, 'POST', $data);
+  if ($response) {
+    drupal_set_message(t('A request to pull code from <strong>@repository (@branch)</strong> into <strong>@destination_repository (@destination_branch)</strong> been successfully created.', array(
+      '@repository' => $repository,
+      '@branch' => $branch,
+      '@destination_repository' => $github_group_name . '/' . $github_repo,
+      '@destination_branch' => $destination_branch,
+    )));
+  }
+
+  return $response;
+}
+
+/**
+ * Check if a tag exists in a git repository.
+ *
+ * @param string $tag
+ *    The tag to check
+ *
+ * @return boolean
+ *    TRUE on success or FALSE on failure.
+ */
+function _sb_stageburner_tag_exists($tag) {
+  $git = variable_get('sb_stageburner_git_bin', '');
+  $tag_exists = _sb_stageburner_exec($git . ' show-ref --verify --quiet refs/tags/' . $tag, '', FALSE);
+  return $tag_exists;
+}
+
+/**
+ * Run post deploy commands.
+ * @param string $site_alias
+ *    The alias of the site on which to run the commands.
+ */
+function _sb_stageburner_post_deploy($site_alias) {
+  // @TODO Drush should not be a requirement
+  $drush = realpath(variable_get('sb_stageburner_drush_bin', ''));
+  $cmd = $drush . ' ' . $site_alias . ' updb -y';
+  _sb_stageburner_exec($cmd);
+
+  // Clear all caches.
+  $cmd = $drush . ' ' . $site_alias . ' cc all';
+  _sb_stageburner_exec($cmd);
+}
+
